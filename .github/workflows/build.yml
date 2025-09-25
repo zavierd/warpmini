@@ -81,7 +81,6 @@ jobs:
         name: windows-builds
         path: |
           warpmini-windows-amd64.zip
-          warpmini-windows-386.zip
 
   build-macos:
     runs-on: macos-latest
