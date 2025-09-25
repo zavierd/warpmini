@@ -39,9 +39,10 @@ Thumbs.db
 *.tmp
 *.log
 
-# Application specific
-warpmini
-warpmini-*
+# Application specific - only ignore built binaries in root
+/warpmini
+/warpmini-*
+!/cmd/warpmini/
 
 # Build output
 dist/
