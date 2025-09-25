@@ -36,17 +36,13 @@ jobs:
     
     - name: Build Linux AMD64
       run: |
-        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
-          -o warpmini-linux-amd64 ./cmd/warpmini
+        CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o warpmini-linux-amd64 ./cmd/warpmini
         chmod +x warpmini-linux-amd64
         tar -czf warpmini-linux-amd64.tar.gz warpmini-linux-amd64
     
     - name: Build Linux ARM64
       run: |
-        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
-          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
-          -o warpmini-linux-arm64 ./cmd/warpmini
+        CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o warpmini-linux-arm64 ./cmd/warpmini
         chmod +x warpmini-linux-arm64
         tar -czf warpmini-linux-arm64.tar.gz warpmini-linux-arm64
     
@@ -106,23 +102,17 @@ jobs:
     
     - name: Build macOS AMD64
       run: |
-        CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 \
-          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
-          -o warpmini-darwin-amd64 ./cmd/warpmini
+        CGO_ENABLED=1 GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o warpmini-darwin-amd64 ./cmd/warpmini
         chmod +x warpmini-darwin-amd64
     
     - name: Build macOS ARM64
       run: |
-        CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 \
-          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" \
-          -o warpmini-darwin-arm64 ./cmd/warpmini
+        CGO_ENABLED=1 GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o warpmini-darwin-arm64 ./cmd/warpmini
         chmod +x warpmini-darwin-arm64
     
     - name: Create Universal Binary
       run: |
-        lipo -create -output warpmini-darwin-universal \
-          warpmini-darwin-amd64 \
-          warpmini-darwin-arm64
+        lipo -create -output warpmini-darwin-universal warpmini-darwin-amd64 warpmini-darwin-arm64
         chmod +x warpmini-darwin-universal
         tar -czf warpmini-darwin-amd64.tar.gz warpmini-darwin-amd64
         tar -czf warpmini-darwin-arm64.tar.gz warpmini-darwin-arm64
