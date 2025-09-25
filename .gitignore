@@ -1,0 +1,69 @@
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# Build directories
+dist/
+bin/
+build/
+
+# OS specific files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# IDE specific files
+.idea/
+.vscode/
+*.iml
+
+# Temporary files
+*.tmp
+*.log
+
+# Application specific
+warpmini
+warpmini-*
+
+# Build output
+dist/
+bin/
+warpmini
+warpmini-*
+
+# Archives
+*.zip
+*.tar.gz
+*.tar
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Goreleaser temp files
+dist/
