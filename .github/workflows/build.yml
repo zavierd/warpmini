@@ -50,31 +50,31 @@ jobs:
     runs-on: windows-latest
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Setup Go
       uses: actions/setup-go@v4
       with:
         go-version: '1.21'
         cache: true
-    
-    - name: Build Windows AMD64
+
+    - name: Setup MSYS2 (mingw64)
+      uses: msys2/setup-msys2@v2
+      with:
+        update: true
+        install: >-
+          mingw-w64-x86_64-gcc
+          zip
+
+    - name: Build Windows AMD64 (CGO)
       shell: powershell
       run: |
-        $env:CGO_ENABLED="1"
-        $env:GOOS="windows"
-        $env:GOARCH="amd64"
-        go build -ldflags="-s -w -H windowsgui -X main.Version=${{ github.ref_name }}" -o warpmini-windows-amd64.exe ./cmd/warpmini
+        $env:CGO_ENABLED = "1"
+        $env:GOOS = "windows"
+        $env:GOARCH = "amd64"
+        $env:CC = "C:\\msys64\\mingw64\\bin\\x86_64-w64-mingw32-gcc.exe"
+        go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=${{ github.ref_name }}" -o warpmini-windows-amd64.exe ./cmd/warpmini
         Compress-Archive -Path warpmini-windows-amd64.exe -DestinationPath warpmini-windows-amd64.zip
-    
-    - name: Build Windows 386
-      shell: powershell
-      run: |
-        $env:CGO_ENABLED="1"
-        $env:GOOS="windows"
-        $env:GOARCH="386"
-        go build -ldflags="-s -w -H windowsgui -X main.Version=${{ github.ref_name }}" -o warpmini-windows-386.exe ./cmd/warpmini
-        Compress-Archive -Path warpmini-windows-386.exe -DestinationPath warpmini-windows-386.zip
-    
+
     - name: Upload Windows artifacts
       uses: actions/upload-artifact@v4
       with:
