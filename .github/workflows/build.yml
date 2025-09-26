@@ -26,10 +26,19 @@ jobs:
         sudo apt-get install -y --no-install-recommends \
           libgl1-mesa-dev xorg-dev pkg-config gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
-    - name: Install Linux cross dependencies (arm64)
+    - name: Configure apt sources for arm64 (ubuntu-ports)
       run: |
+        source /etc/os-release
+        CODENAME=${VERSION_CODENAME:-noble}
+        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME} main universe multiverse" | sudo tee /etc/apt/sources.list.d/ubuntu-arm64.list
+        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-updates main universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ubuntu-arm64.list
+        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-security main universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ubuntu-arm64.list
+        echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports ${CODENAME}-backports main universe multiverse" | sudo tee -a /etc/apt/sources.list.d/ubuntu-arm64.list
         sudo dpkg --add-architecture arm64
         sudo apt-get update -qq
+
+    - name: Install Linux cross dependencies (arm64)
+      run: |
         # core cross toolchain + libc headers
         sudo apt-get install -y --no-install-recommends \
           libc6-dev-arm64-cross pkg-config-aarch64-linux-gnu
@@ -77,19 +86,21 @@ jobs:
       uses: msys2/setup-msys2@v2
       with:
         update: true
+        msystem: MINGW64
         install: >-
           mingw-w64-x86_64-gcc
           zip
 
     - name: Build Windows AMD64 (CGO)
-      shell: powershell
+      shell: msys2 {0}
+      env:
+        CGO_ENABLED: '1'
+        GOOS: windows
+        GOARCH: amd64
+        CC: x86_64-w64-mingw32-gcc
       run: |
-        $env:CGO_ENABLED = "1"
-        $env:GOOS = "windows"
-        $env:GOARCH = "amd64"
-        $env:CC = "C:\\msys64\\mingw64\\bin\\x86_64-w64-mingw32-gcc.exe"
         go build -trimpath -ldflags "-s -w -H windowsgui -X main.Version=${{ github.ref_name }}" -o warpmini-windows-amd64.exe ./cmd/warpmini
-        Compress-Archive -Path warpmini-windows-amd64.exe -DestinationPath warpmini-windows-amd64.zip
+        zip -r warpmini-windows-amd64.zip warpmini-windows-amd64.exe
 
     - name: Upload Windows artifacts
       uses: actions/upload-artifact@v4
