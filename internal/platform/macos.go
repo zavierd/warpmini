@@ -227,9 +227,12 @@ func CleanupMac() error {
 	cleanup.RemoveGlob(filepath.Join(home, "Library", "Application Scripts", "dev.warp.*"), errs)
 
 	// Home dot directories and XDG-style paths (clear all)
+	// 注意：排除 .warp_config 备份目录
 	for _, pat := range []string{
-		filepath.Join(home, ".warp*"),
-		filepath.Join(home, ".warp_*"),
+		filepath.Join(home, ".warp"),       // 只删除 .warp 文件夹本身
+		filepath.Join(home, ".warp-*"),     // 删除 .warp-xxx 但不会匹配 .warp_config
+		filepath.Join(home, ".warp_cache"), // 只删除特定的缓存目录
+		filepath.Join(home, ".warp_temp"),  // 只删除特定的临时目录
 		filepath.Join(home, ".config", "warp"),
 		filepath.Join(home, ".local", "share", "warp"),
 		filepath.Join(home, ".cache", "warp"),

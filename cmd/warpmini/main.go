@@ -188,12 +188,27 @@ func main() {
 				status.SetText("需要先登录后再备份")
 				return
 			}
-			mcp, rules, err := doBackupWithGo(lastIDToken, lastRefreshToken, lastEmail)
-			if err != nil {
-				status.SetText("备份失败: " + err.Error())
-				return
+			
+			// 检查备份文件是否存在
+			backupPath, _ := backupFilePath()
+			if _, err := os.Stat(backupPath); err == nil {
+				// 文件已存在，直接覆盖（简化处理，避免对话框复杂度）
+				status.SetText("备份文件已存在，正在覆盖...")
+				mcp, rules, err := doBackupWithGoForced(lastIDToken, lastRefreshToken, lastEmail)
+				if err != nil {
+					status.SetText("备份失败: " + err.Error())
+					return
+				}
+				status.SetText(fmt.Sprintf("✅ 备份完成（已覆盖）：MCP %d, 规则 %d（~/.warp_config/config_backup.json）", mcp, rules))
+			} else {
+				// 文件不存在，直接备份
+				mcp, rules, err := doBackupWithGo(lastIDToken, lastRefreshToken, lastEmail)
+				if err != nil {
+					status.SetText("备份失败: " + err.Error())
+					return
+				}
+				status.SetText(fmt.Sprintf("✅ 备份完成：MCP %d, 规则 %d（~/.warp_config/config_backup.json）", mcp, rules))
 			}
-			status.SetText(fmt.Sprintf("✅ 备份完成：MCP %d, 规则 %d（~/.warp_config/config_backup.json）", mcp, rules))
 		}()
 	})
 
@@ -291,6 +306,16 @@ type BackupData struct {
 
 // doBackupWithGo 使用 GraphQL 从云端获取配置并保存到本地
 func doBackupWithGo(idToken, refreshToken, email string) (int, int, error) {
+	return doBackupWithOverwriteOption(idToken, refreshToken, email, false)
+}
+
+// doBackupWithGoForced 强制覆盖备份
+func doBackupWithGoForced(idToken, refreshToken, email string) (int, int, error) {
+	return doBackupWithOverwriteOption(idToken, refreshToken, email, true)
+}
+
+// doBackupWithOverwriteOption 使用 GraphQL 从云端获取配置并保存到本地（带覆盖选项）
+func doBackupWithOverwriteOption(idToken, refreshToken, email string, forceOverwrite bool) (int, int, error) {
 	client := &gqlClient{IDToken: idToken, RefreshToken: refreshToken}
 	cloud, err := client.GetUpdatedCloudObjects()
 	if err != nil {
@@ -335,7 +360,7 @@ func doBackupWithGo(idToken, refreshToken, email string) (int, int, error) {
 		DataSource:   "warp_api",
 		AccountEmail: email,
 	}
-	if err := saveBackupFile(bd); err != nil {
+	if err := saveBackupFile(bd, forceOverwrite); err != nil {
 		return 0, 0, err
 	}
 	return len(mcpServers), len(rules), nil
@@ -349,12 +374,59 @@ func doRestoreWithGo(idToken, refreshToken, userID string) (RestoreResult, error
 	}
 	client := &gqlClient{IDToken: idToken, RefreshToken: refreshToken}
 	res := RestoreResult{}
+	
+	// 获取当前账号已有的配置，用于去重
+	existingConfigs := make(map[string]bool)
+	if existingData, err := client.GetUpdatedCloudObjects(); err == nil {
+		if arr, ok := existingData["genericStringObjects"].([]any); ok {
+			for _, it := range arr {
+				m, _ := it.(map[string]any)
+				if m == nil {
+					continue
+				}
+				format, _ := m["format"].(string)
+				serialized := asString(m["serializedModel"])
+				if serialized == "" {
+					serialized = asString(m["serialized_model"])
+				}
+				if serialized != "" {
+					// 解析配置名称
+					var configData map[string]any
+					if err := json.Unmarshal([]byte(serialized), &configData); err == nil {
+						var name string
+						if format == "JsonMCPServer" {
+							name, _ = configData["name"].(string)
+							existingConfigs[fmt.Sprintf("mcp:%s", name)] = true
+						} else if format == "JsonAIFact" {
+							if memory, ok := configData["memory"].(map[string]any); ok {
+								name, _ = memory["name"].(string)
+								existingConfigs[fmt.Sprintf("rule:%s", name)] = true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	
 	// MCP 恢复
 	for _, m := range bd.MCPServers {
 		serialized := asString(m["serializedModel"])
 		if serialized == "" {
 			continue
 		}
+		
+		// 检查是否已存在同名配置
+		var configData map[string]any
+		if err := json.Unmarshal([]byte(serialized), &configData); err == nil {
+			if name, _ := configData["name"].(string); name != "" {
+				if existingConfigs[fmt.Sprintf("mcp:%s", name)] {
+					res.TotalSkipped++
+					continue // 跳过已存在的配置
+				}
+			}
+		}
+		
 		ok, skipped, err := client.CreateGenericStringObject("JsonMCPServer", serialized, userID)
 		if err != nil {
 			res.TotalFailed++
@@ -372,6 +444,20 @@ func doRestoreWithGo(idToken, refreshToken, userID string) (RestoreResult, error
 		if serialized == "" {
 			continue
 		}
+		
+		// 检查是否已存在同名配置
+		var configData map[string]any
+		if err := json.Unmarshal([]byte(serialized), &configData); err == nil {
+			if memory, ok := configData["memory"].(map[string]any); ok {
+				if name, _ := memory["name"].(string); name != "" {
+					if existingConfigs[fmt.Sprintf("rule:%s", name)] {
+						res.TotalSkipped++
+						continue // 跳过已存在的配置
+					}
+				}
+			}
+		}
+		
 		ok, skipped, err := client.CreateGenericStringObject("JsonAIFact", serialized, userID)
 		if err != nil {
 			res.TotalFailed++
@@ -568,9 +654,16 @@ func backupFilePath() (string, error) {
 	return filepath.Join(dir, "config_backup.json"), nil
 }
 
-func saveBackupFile(b BackupData) error {
+func saveBackupFile(b BackupData, forceOverwrite bool) error {
 	path, err := backupFilePath()
 	if err != nil { return err }
+	
+	// 检查文件是否已存在
+	if _, err := os.Stat(path); err == nil && !forceOverwrite {
+		// 文件存在，需要用户确认是否覆盖
+		return fmt.Errorf("备份文件已存在: %s，请手动删除或选择覆盖", path)
+	}
+	
 	f, err := os.Create(path)
 	if err != nil { return err }
 	defer f.Close()
