@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -21,6 +24,9 @@ import (
 	"warpmini/internal/platform"
 	"warpmini/pkg/theme"
 )
+
+// Version will be set by -ldflags "-X main.Version=..." in CI
+var Version = "dev"
 
 // Firebase secure token API (same as project)
 const firebaseAPIKey = "AIzaSyBdy3O3S9hrdayLJxJ7mriBR4qgUaUygAs"
@@ -61,12 +67,18 @@ type keychainPayload struct {
 	IsOnWorkDomain       bool        `json:"is_on_work_domain"`
 }
 
+// 缓存最近一次登录获得的令牌，供备份/恢复直接使用
+var lastIDToken string
+var lastRefreshToken string
+var lastUserID string
+var lastEmail string
+
 func main() {
 	a := app.New()
 	a.SetIcon(assets.ResourceZWarpPng)
 	theme.UseCNFontIfAvailable(a)
 	w := a.NewWindow("WarpMini")
-	w.Resize(fyne.NewSize(520, 180))
+	w.Resize(fyne.NewSize(640, 200))
 
 	input := widget.NewMultiLineEntry()
 	input.SetPlaceHolder("请输入 refresh_token ...")
@@ -112,6 +124,14 @@ func main() {
 				status.SetText("登录失败: " + err.Error())
 				return
 			}
+
+			// 解析写入的JSON以缓存 token 和用户信息（供备份/恢复使用）
+			var kc keychainPayload
+			_ = json.Unmarshal(kcJSON, &kc)
+			lastIDToken = kc.IDToken.IDToken
+			lastRefreshToken = kc.IDToken.RefreshToken
+			lastUserID = kc.LocalID
+			lastEmail = email
 
 			if runtime.GOOS == "darwin" {
 				err = platform.StoreToMacKeychain(email, kcJSON)
@@ -160,11 +180,53 @@ func main() {
 		}()
 	})
 
+	// 备份按钮：Go 实现，打包后可直接使用
+	backupBtn := widget.NewButton("备份", func() {
+		status.SetText("正在备份…")
+		go func() {
+			if strings.TrimSpace(lastIDToken) == "" || strings.TrimSpace(lastRefreshToken) == "" {
+				status.SetText("需要先登录后再备份")
+				return
+			}
+			mcp, rules, err := doBackupWithGo(lastIDToken, lastRefreshToken, lastEmail)
+			if err != nil {
+				status.SetText("备份失败: " + err.Error())
+				return
+			}
+			status.SetText(fmt.Sprintf("✅ 备份完成：MCP %d, 规则 %d（~/.warp_config/config_backup.json）", mcp, rules))
+		}()
+	})
+
+	// 恢复按钮：Go 实现
+	restoreBtn := widget.NewButton("恢复", func() {
+		status.SetText("正在恢复备份…")
+		go func() {
+			if strings.TrimSpace(lastIDToken) == "" || strings.TrimSpace(lastRefreshToken) == "" {
+				status.SetText("需要先登录后再恢复")
+				return
+			}
+			res, err := doRestoreWithGo(lastIDToken, lastRefreshToken, lastUserID)
+			if err != nil {
+				status.SetText("恢复失败: " + err.Error())
+				return
+			}
+			if !res.Success {
+				if res.Error != "" {
+					status.SetText("恢复失败: " + res.Error)
+				} else {
+					status.SetText("恢复失败：未知错误")
+				}
+				return
+			}
+			status.SetText(fmt.Sprintf("✅ 恢复完成：成功 %d，跳过 %d，失败 %d", res.TotalSuccess, res.TotalSkipped, res.TotalFailed))
+		}()
+	})
+
 	w.SetContent(container.NewVBox(
 		widget.NewLabel("refresh_token:"),
 		input,
 		refreshCheck,
-		container.NewHBox(loginBtn, cleanupBtn),
+		container.NewHBox(loginBtn, cleanupBtn, backupBtn, restoreBtn),
 		status,
 	))
 	w.ShowAndRun()
@@ -203,6 +265,333 @@ func loginAndBuildKeychainJSON(refreshToken string) ([]byte, string, error) {
 		return nil, "", err
 	}
 	return b, email, nil
+}
+
+// RestoreResult 承载恢复统计
+type RestoreResult struct {
+	Success      bool   `json:"success"`
+	Message      string `json:"message"`
+	Error        string `json:"error"`
+	TotalSuccess int    `json:"total_success"`
+	TotalFailed  int    `json:"total_failed"`
+	TotalSkipped int    `json:"total_skipped"`
+}
+
+// BackupData 备份文件结构（与父级结构对齐，简化）
+type BackupData struct {
+	BackupTime   string           `json:"backup_time"`
+	BackupType   string           `json:"backup_type"`
+	MCPServers   []map[string]any `json:"mcp_servers"`
+	Rules        []map[string]any `json:"rules"`
+	Version      string           `json:"version"`
+	Format       string           `json:"format"`
+	DataSource   string           `json:"data_source"`
+	AccountEmail string           `json:"account_email"`
+}
+
+// doBackupWithGo 使用 GraphQL 从云端获取配置并保存到本地
+func doBackupWithGo(idToken, refreshToken, email string) (int, int, error) {
+	client := &gqlClient{IDToken: idToken, RefreshToken: refreshToken}
+	cloud, err := client.GetUpdatedCloudObjects()
+	if err != nil {
+		return 0, 0, err
+	}
+	mcpServers := []map[string]any{}
+	rules := []map[string]any{}
+	if arr, ok := cloud["genericStringObjects"].([]any); ok {
+		for _, it := range arr {
+			m, _ := it.(map[string]any)
+			if m == nil {
+				continue
+			}
+			format, _ := m["format"].(string)
+			serialized := asString(m["serializedModel"]) // 可能在另一个字段上
+			// 有些响应把 serializedModel 外放，我们兜底
+			if serialized == "" {
+				serialized = asString(m["serialized_model"]) // 容错
+			}
+			if format == "JsonMCPServer" && serialized != "" {
+				mcpServers = append(mcpServers, map[string]any{
+					"format":          "JsonMCPServer",
+					"serializedModel": serialized,
+				})
+			}
+			if format == "JsonAIFact" && serialized != "" {
+				rules = append(rules, map[string]any{
+					"format":          "JsonAIFact",
+					"serializedModel": serialized,
+				})
+			}
+		}
+	}
+	// 组装备份
+	bd := BackupData{
+		BackupTime:   time.Now().Format(time.RFC3339),
+		BackupType:   "global",
+		MCPServers:   mcpServers,
+		Rules:        rules,
+		Version:      "2.3",
+		Format:       "simplified",
+		DataSource:   "warp_api",
+		AccountEmail: email,
+	}
+	if err := saveBackupFile(bd); err != nil {
+		return 0, 0, err
+	}
+	return len(mcpServers), len(rules), nil
+}
+
+// doRestoreWithGo 从本地备份恢复到当前账户
+func doRestoreWithGo(idToken, refreshToken, userID string) (RestoreResult, error) {
+	bd, err := loadBackupFile()
+	if err != nil {
+		return RestoreResult{Success: false, Error: err.Error()}, nil
+	}
+	client := &gqlClient{IDToken: idToken, RefreshToken: refreshToken}
+	res := RestoreResult{}
+	// MCP 恢复
+	for _, m := range bd.MCPServers {
+		serialized := asString(m["serializedModel"])
+		if serialized == "" {
+			continue
+		}
+		ok, skipped, err := client.CreateGenericStringObject("JsonMCPServer", serialized, userID)
+		if err != nil {
+			res.TotalFailed++
+			continue
+		}
+		if skipped {
+			res.TotalSkipped++
+		} else if ok {
+			res.TotalSuccess++
+		}
+	}
+	// 规则恢复
+	for _, m := range bd.Rules {
+		serialized := asString(m["serializedModel"])
+		if serialized == "" {
+			continue
+		}
+		ok, skipped, err := client.CreateGenericStringObject("JsonAIFact", serialized, userID)
+		if err != nil {
+			res.TotalFailed++
+			continue
+		}
+		if skipped {
+			res.TotalSkipped++
+		} else if ok {
+			res.TotalSuccess++
+		}
+	}
+	res.Success = res.TotalFailed == 0
+	if res.Success {
+		res.Message = fmt.Sprintf("恢复完成: 成功 %d，跳过 %d", res.TotalSuccess, res.TotalSkipped)
+	} else {
+		res.Message = fmt.Sprintf("部分成功: 成功 %d，跳过 %d，失败 %d", res.TotalSuccess, res.TotalSkipped, res.TotalFailed)
+	}
+	return res, nil
+}
+
+// ===== GraphQL 客户端与工具 =====
+
+type gqlClient struct {
+	IDToken      string
+	RefreshToken string
+}
+
+func (c *gqlClient) do(op string, payload map[string]any) (map[string]any, int, error) {
+	url := "https://app.warp.dev/graphql/v2?op=" + op
+	body, _ := json.Marshal(payload)
+	doOnce := func() (map[string]any, int, error) {
+		req, _ := http.NewRequest("POST", url, bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+c.IDToken)
+		req.Header.Set("User-Agent", randomUA())
+		client := &http.Client{Timeout: 30 * time.Second}
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, 0, err
+		}
+		defer resp.Body.Close()
+		b, _ := io.ReadAll(resp.Body)
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			var m map[string]any
+			_ = json.Unmarshal(b, &m)
+			return m, resp.StatusCode, nil
+		}
+		var m map[string]any
+		_ = json.Unmarshal(b, &m)
+		return m, resp.StatusCode, fmt.Errorf("http %d", resp.StatusCode)
+	}
+	res, code, err := doOnce()
+	if code == 401 && c.RefreshToken != "" {
+		// 尝试刷新一次
+		id, refresh, _, _, _, _, _, rErr := refreshFirebaseToken(c.RefreshToken)
+		if rErr == nil && id != "" {
+			c.IDToken = id
+			if refresh != "" {
+				c.RefreshToken = refresh
+			}
+			// 更新全局缓存，便于后续请求
+			lastIDToken = c.IDToken
+			lastRefreshToken = c.RefreshToken
+			return doOnce()
+		}
+	}
+	return res, code, err
+}
+
+func (c *gqlClient) GetUpdatedCloudObjects() (map[string]any, error) {
+	query := `
+query GetUpdatedCloudObjects($input: UpdatedCloudObjectsInput!, $requestContext: RequestContext!) {
+  updatedCloudObjects(input: $input, requestContext: $requestContext) {
+    __typename
+    ... on UpdatedCloudObjectsOutput {
+      genericStringObjects {
+        format
+        serializedModel
+        metadata { uid metadataLastUpdatedTs }
+      }
+      workflows {
+        data
+        metadata { uid metadataLastUpdatedTs }
+      }
+      responseContext { serverVersion }
+    }
+    ... on UserFacingError {
+      error { __typename message }
+      responseContext { serverVersion }
+    }
+  }
+}
+`
+	variables := map[string]any{
+		"input": map[string]any{
+			"folders":              []any{},
+			"forceRefresh":         true,
+			"genericStringObjects": []any{},
+			"notebooks":            []any{},
+			"workflows":            []any{},
+		},
+		"requestContext": map[string]any{"osContext": map[string]any{}, "clientContext": map[string]any{}},
+	}
+	payload := map[string]any{"operationName": "GetUpdatedCloudObjects", "variables": variables, "query": query}
+	res, _, err := c.do("GetUpdatedCloudObjects", payload)
+	if err != nil {
+		return nil, err
+	}
+	data, ok := res["data"].(map[string]any)
+	if !ok {
+		return nil, errors.New("响应格式异常: 缺少data")
+	}
+	uco, ok := data["updatedCloudObjects"].(map[string]any)
+	if !ok {
+		return nil, errors.New("响应格式异常: 缺少updatedCloudObjects")
+	}
+	typ, _ := uco["__typename"].(string)
+	if typ == "UserFacingError" {
+		errMap, _ := uco["error"].(map[string]any)
+		msg := asString(errMap["message"])
+		if msg == "" { msg = "API错误" }
+		return nil, errors.New(msg)
+	}
+	if typ != "UpdatedCloudObjectsOutput" {
+		return nil, errors.New("响应类型异常")
+	}
+	return uco, nil
+}
+
+func (c *gqlClient) CreateGenericStringObject(format, serializedModel, userUID string) (ok bool, skipped bool, err error) {
+	mutation := `
+mutation CreateGenericStringObject($input: CreateGenericStringObjectInput!, $requestContext: RequestContext!) {
+  createGenericStringObject(input: $input, requestContext: $requestContext) {
+    __typename
+    ... on CreateGenericStringObjectOutput {
+      genericStringObject { metadata { uid } format }
+    }
+    ... on UserFacingError { error { __typename message } }
+  }
+}
+`
+	variables := map[string]any{
+		"input": map[string]any{
+			"genericStringObject": map[string]any{
+				"clientId":        fmt.Sprintf("Client-%d", time.Now().UnixNano()),
+				"entrypoint":      "Unknown",
+				"format":          format,
+				"initialFolderId": nil,
+				"serializedModel": serializedModel,
+				"uniquenessKey":  nil,
+			},
+			"owner": map[string]any{"uid": userUID, "type": "User"},
+		},
+		"requestContext": map[string]any{
+			"clientContext": map[string]any{"version": "v0.2025.09.03.08.11.stable_02"},
+			"osContext":     map[string]any{"category": runtime.GOOS, "name": runtime.GOOS, "version": ""},
+		},
+	}
+	payload := map[string]any{"operationName": "CreateGenericStringObject", "variables": variables, "query": mutation}
+	res, _, e := c.do("CreateGenericStringObject", payload)
+	if e != nil {
+		return false, false, e
+	}
+	data, _ := res["data"].(map[string]any)
+	if data == nil { return false, false, errors.New("响应缺少data") }
+	cgo, _ := data["createGenericStringObject"].(map[string]any)
+	if cgo == nil { return false, false, errors.New("响应缺少createGenericStringObject") }
+	typ, _ := cgo["__typename"].(string)
+	if typ == "CreateGenericStringObjectOutput" {
+		return true, false, nil
+	}
+	if typ == "UserFacingError" {
+		errMap, _ := cgo["error"].(map[string]any)
+		msg := asString(errMap["message"])
+		if strings.Contains(strings.ToLower(msg), "unique") || strings.Contains(msg, "UniqueKeyConflict") {
+			return false, true, nil // 视为跳过（已存在）
+		}
+		return false, false, errors.New(msg)
+	}
+	return false, false, errors.New("未知响应类型")
+}
+
+// 随机 UA，遵循项目风格（轻量实现）
+func randomUA() string {
+	return "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_0_1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.6777.120 Safari/537.36"
+}
+
+// 保存/读取备份文件
+func backupFilePath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil { return "", err }
+	dir := filepath.Join(home, ".warp_config")
+	if err := os.MkdirAll(dir, 0o755); err != nil { return "", err }
+	return filepath.Join(dir, "config_backup.json"), nil
+}
+
+func saveBackupFile(b BackupData) error {
+	path, err := backupFilePath()
+	if err != nil { return err }
+	f, err := os.Create(path)
+	if err != nil { return err }
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	enc.SetIndent("", "  ")
+	return enc.Encode(b)
+}
+
+func loadBackupFile() (BackupData, error) {
+	var b BackupData
+	path, err := backupFilePath()
+	if err != nil { return b, err }
+	data, err := os.ReadFile(path)
+	if err != nil { return b, err }
+	if err := json.Unmarshal(data, &b); err != nil { return b, err }
+	return b, nil
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func refreshFirebaseToken(refreshToken string) (idToken, newRefresh, userID, email string, exp int64, name, picture string, err error) {
