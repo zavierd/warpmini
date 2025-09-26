@@ -167,7 +167,7 @@ jobs:
           
           ### 下载说明
           - **macOS**: 下载 `warpmini-darwin-universal.tar.gz` (支持 Intel 和 Apple Silicon)
-          - **Windows**: 下载 `warpmini-windows-amd64.zip` (64位) 或 `warpmini-windows-386.zip` (32位)
+          - **Windows**: 下载 `warpmini-windows-amd64.zip` (64位)
           - **Linux**: 下载 `warpmini-linux-amd64.tar.gz` (x64) 或 `warpmini-linux-arm64.tar.gz` (ARM64)
           
           ### 使用方法
